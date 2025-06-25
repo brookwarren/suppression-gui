@@ -40,32 +40,48 @@ func NewServer(ctx context.Context) (*Server, error) {
 	return s, nil
 }
 
-// refresh queries AWS SES for the complete account‑level suppression list
+// refresh queries AWS SES for *all* account-level suppressed addresses
 func (s *Server) refresh(ctx context.Context) error {
-	var emails []string
-	paginator := sesv2.NewListSuppressedDestinationsPaginator(s.client, &sesv2.ListSuppressedDestinationsInput{})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
+	var (
+		emails []string
+		token  *string // pagination cursor
+	)
+
+	for {
+		out, err := s.client.ListSuppressedDestinations(
+			ctx,
+			&sesv2.ListSuppressedDestinationsInput{
+				NextToken: token,
+				PageSize:  aws.Int32(1000),
+			},
+		)
 		if err != nil {
 			return err
 		}
-		for _, d := range page.SuppressedDestinationSummaries {
+
+		for _, d := range out.SuppressedDestinationSummaries {
 			emails = append(emails, aws.ToString(d.EmailAddress))
 		}
+
+		if out.NextToken == nil { // no more pages
+			break
+		}
+		token = out.NextToken
 	}
-	// Sort case‑insensitively a‑>z
+
+	// Case-insensitive sort A->Z
 	sort.Slice(emails, func(i, j int) bool {
 		return strings.ToLower(emails[i]) < strings.ToLower(emails[j])
 	})
 
+	// Build quick-lookup map
 	idx := make(map[string]string, len(emails))
 	for _, e := range emails {
 		idx[strings.ToLower(e)] = e
 	}
 
 	s.listMu.Lock()
-	s.list = emails
-	s.index = idx
+	s.list, s.index = emails, idx
 	s.listMu.Unlock()
 	return nil
 }
